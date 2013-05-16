@@ -1,0 +1,385 @@
+#!/usr/bin/perl
+#############################################################################
+# Copyright (C) 2007-2013 Lawrence Livermore National Security, LLC.
+# Produced at the Lawrence Livermore National Laboratory.
+# Written by Mark A. Grondona <mgrondona@llnl.gov>.
+# UCRL-CODE-23545. All rights reserved.
+#
+# This file is part of numa-maps.
+#
+#############################################################################
+#
+#  Gather NUMA information about running processes from /proc/PID/maps
+#   and /proc/PID/numa_maps.
+#
+#############################################################################
+use strict;
+use warnings;
+use POSIX;
+use Getopt::Long;
+use File::Basename;
+
+#############################################################################
+#
+#  Usage:
+#
+my $prog     = basename $0;
+my $usage    = <<EOF;
+Usage: $prog [OPTIONS] PID...
+
+ -u, --user=name    Report on all processes owned by user "name."
+ -n, --name=pattern Report on all processes whose name matches "pattern."
+ -a, --all          Report on all processes (for which you have permission).
+
+ -H, --heap-only    Report NUMA information for heap only.
+ -S, --stack-only   Report NUMA information for stack only.
+ -F, --full         Full NUMA statistics report for mapped files, heap & stack.
+ -T, --total        Report total mapped memory for all files, heap & stack.
+
+ -q, --ignore-zero  Don't print info for processes with 0 pages mapped.
+ -n, --no-header    Omit output of header row.
+ -h, --help         Print this usage message.
+EOF
+#############################################################################
+
+my $pagesize  = POSIX::sysconf (&POSIX::_SC_PAGESIZE);
+my $nnodes    = nnodes_available ();
+my $maxnode   = $nnodes - 1;
+my @nodenames = map { "    N$_"} (0 .. $maxnode);
+my %conf      = ();
+
+#############################################################################
+
+parse_cmdline ();
+
+my %data = get_process_data ();
+
+log_fatal ("No eligible PIDs found!\n")  unless (scalar keys %data);
+
+if ($conf{all_files}) {
+    do_full_output (\%data);
+}
+else {
+    do_stack_and_heap (\%data);
+}
+
+exit 0;
+
+sub parse_cmdline
+{
+    $conf{heap_only}   = 0;
+    $conf{stack_only}  = 0;
+    $conf{all_files}   = 0;
+    $conf{noheader}    = 0;
+    $conf{totals}      = 0;
+    $conf{all_pids}    = 0;
+    $conf{user}        = "";
+    $conf{proc_name}   = "";
+    @{$conf{pid_list}} = ();
+
+    Getopt::Long::Configure ("bundling");
+
+    my $rc = GetOptions (
+               "heap-only|H"  => \$conf{heap_only}  ,
+               "stack-only|S" => \$conf{stack_only} ,
+               "full|F"       => \$conf{all_files}  ,
+               "no-header|n"  => \$conf{noheader}   ,
+               "total|T"      => \$conf{totals}     ,
+               "user|u=s"     => \$conf{user}       ,
+               "name|n=s"     => \$conf{name}       ,
+               "all|a"        => \$conf{all_pids}   ,
+               "help|h"       => sub { usage (0) } 
+                         );
+    usage (1) if !$rc;
+
+    # 
+    #  Remaining args must be list of pids.
+    #
+    @{$conf{pid_list}} = @ARGV;
+
+#    unless (scalar @{$conf{pid_list}}) {
+#        log_fatal ("No PIDs found.\n");
+#    }
+
+    if ($conf{heap_only} && $conf{stack_only}) {
+        log_error ("Only specify one of --heap-only or --stack-only\n");
+        usage (1);
+    }
+
+    if ($conf{all_files} && ($conf{heap_only} || $conf{stack_only})) {
+        log_error ("Do not specify --heap-only or --stack-only with --full\n");
+        usage (1);
+    }
+
+    if ($conf{user}) {
+        if ($conf{user} =~ /\d+/) {
+            $conf{uid} = $conf{user};
+        }
+        else {
+            $conf{uid} = getpwnam ($conf{user}) 
+                or log_fatal ("No such user \"$conf{user}\"\n");
+        }
+    }
+
+}
+
+sub log_error
+{
+    print STDERR "$prog: @_";
+}
+
+sub log_fatal
+{
+    print STDERR "$prog: @_";
+    exit (1);
+}
+
+sub get_process_data
+{
+    my %data = ();
+
+    opendir (PROC, "/proc") or die "Unable to open /proc: $!\n";
+
+    while ((my $pid = readdir (PROC))) {
+
+        next unless ($pid =~ /\d+/);
+
+        next if (@{$conf{pid_list}} && !grep {$pid == $_} @{$conf{pid_list}});
+
+        if (  (!parse_proc_status ($pid, \%data))
+           || (!exists $data{$pid}{vmsize})                    
+           || ($conf{user} && $conf{uid} != $data{$pid}{uid})
+           || ($conf{name} && $data{$pid}{name} !~ $conf{name}) 
+           || (! -r "/proc/$pid/maps")) {
+            delete $data{$pid};
+            next;
+        }
+
+        parse_numa_maps ($pid, \%data);
+    }
+
+    closedir (PROC);
+
+    return (%data);
+}
+
+sub parse_proc_status
+{
+    my ($pid, $ref) = @_;
+
+    open (DATA, "/proc/$pid/status") or return (0);
+    
+    while (<DATA>) {
+        chomp;
+        s/kB//;
+        my ($key, $value) = /^(\w+):\s*(.+)\s*$/;
+        next unless $value;
+        my @values = split (/\s+/, $value);
+        $$ref{$pid}{lc $key} = $values[0];
+    }
+
+    close (DATA);
+
+    return (1);
+}
+
+sub get_files_from_proc_maps
+{
+    my ($ref, $pid) = @_;
+    my $file = "/proc/$pid/maps";
+    my $h = "[a-f0-9]+";
+
+    open (MAPS, "/proc/$pid/maps") or die "Failed to open $file: $!\n";
+
+    while (<MAPS>) {
+        my ($start, $finish, $file) =  
+           /^($h)-($h)\s+....\s+$h\s+\S+\s+\S+\s*(\S*)/;
+
+        $file =~ s/\[(\w+)\]/$1/g;
+
+        $file = "heap" unless $file;
+
+        $$ref{$pid}{maps}{$start}{file} = $file;
+    }
+
+    close (MAPS);
+
+    return;
+}
+
+sub parse_numa_maps
+{
+    my ($pid, $ref) = @_;
+    my $numa_maps = "/proc/$pid/numa_maps";
+    my $read_maps = 0;
+
+    open (DATA, $numa_maps) or die "Failed to open $numa_maps: $!\n";
+
+    while (<DATA>) {
+        chomp;
+        
+        # Prepend file= to  "stack" and "heap" so we treat it like the 
+        #  rest of the files.
+        s/ (stack|heap) / file=$1 /g;
+
+        my ($addr, $policy, @rest) = split /\s+/;
+
+        $$ref{$pid}{maps}{$addr}{policy} = $policy;
+
+        map { $$ref{$pid}{maps}{$addr}{lc $$_[0]} = $$_[1] }
+            map {[split /=/]} @rest;
+
+        if (!exists $$ref{$pid}{maps}{$addr}{file} && !$read_maps) {
+            get_files_from_proc_maps ($ref, $pid);
+            $read_maps++;
+        }
+
+        my $file = $$ref{$pid}{maps}{$addr}{file} or next;
+
+        if (!exists $$ref{$pid}{files}{$file}{order}) {
+            $$ref{$pid}{files}{$file}{order} = $$ref{$pid}{order}++;
+        }
+
+        $$ref{$pid}{files}{$file}{mapped} += 
+           ($$ref{$pid}{maps}{$addr}{mapped}  || 0) +
+           ($$ref{$pid}{maps}{$addr}{anon}    || 0);
+
+        for my $n ( grep { /n[0-9]+/ } keys %{$$ref{$pid}{maps}{$addr}} ) {
+            $$ref{$pid}{files}{$file}{$n} += $$ref{$pid}{maps}{$addr}{$n};
+        }
+    }
+
+    close (DATA);
+
+    return;
+}
+
+sub nnodes_available
+{
+    opendir (NODES, "/sys/devices/system/node") or return 0;
+    my @nodedirs = grep { /^node\d/ } readdir (NODES);
+    closedir (NODES);
+    return  scalar @nodedirs;
+}
+
+sub ab
+{
+    my ($pages) = @_;
+
+    my $bytes = ($pages||0) * $pagesize;
+    my $ret;
+
+    if ($bytes !~ /^[0-9.]+$/) {
+        return $bytes;
+    }
+    if ($bytes > 1024*1024*1024) {
+        $ret = sprintf("%5.2fG", $bytes / (1024*1024*1024));
+    } elsif ($bytes > 1024*1024) {
+        $ret = sprintf("%5.1fM", $bytes / (1024*1024));
+    } elsif ($bytes > 1024) {
+        $ret = sprintf("%5dK", $bytes / 1024);
+    } else {
+        $ret = sprintf ("%5d ", $bytes);
+    }
+    return $ret
+}
+
+sub get_cpu_bind
+{
+    my ($pid) = @_;
+    my $line = `taskset -cp $pid 2>/dev/null`;
+    $line =~ /^.*current affinity list: (\S+)/;
+
+    return ((defined $1) ? $1 : "?");
+}
+
+
+sub usage 
+{
+    my ($rc) = @_;
+    print STDERR "$usage";
+    exit ($rc);
+}
+
+sub sortedfilelist
+{
+    my ($ref, $pid) = @_;
+
+    sort { $$ref{$pid}{files}{$a}{order} <=> $$ref{$pid}{files}{$b}{order} } 
+          keys %{$$ref{$pid}{files}};
+}
+
+sub do_stack_and_heap
+{
+    my ($ref) = @_;
+
+    printf "%5s %-15s %7s %9s [ @nodenames ]\n",
+           "PID", "COMMAND", "CPUMASK", "TOTAL"
+        unless ($conf{noheader});
+
+    for my $pid (sort keys %$ref) {
+        my %t = ();
+
+        next unless (exists $$ref{$pid}{files});
+        
+        if (!$conf{stack_only} && defined $$ref{$pid}{files}{heap}) {
+            $t{total} += $$ref{$pid}{files}{heap}{mapped};
+            $t{nodes}[$_] += $$ref{$pid}{files}{heap}{"n$_"} || 0
+                for (0 .. $maxnode);
+        }
+
+        if (!$conf{heap_only} && defined $$ref{$pid}{files}{stack}) {
+            $t{total} += $$ref{$pid}{files}{stack}{mapped};
+            $t{nodes}[$_] += $$ref{$pid}{files}{stack}{"n$_"} || 0
+                for (0 .. $maxnode);
+        }
+
+        my @n = map {ab ($_)} @{$t{nodes}}; 
+
+        printf "%5s %-15.15s %7s %9s [ @n ]\n",
+               $pid, $$ref{$pid}{name}, get_cpu_bind ($pid), ab ($t{total});
+                
+    }
+}
+
+sub do_full_output
+{
+    my ($ref) = @_;
+    my $maxwid = 25;
+    
+    printf "%5s %9.0s %-*s  TOTAL [ @nodenames ]\n",
+           "PID", "COMM", $maxwid, "MAPPING"
+       unless ($conf{noheader});
+
+    for my $pid (sort keys %$ref) {
+        my %t = ();
+
+        next unless (exists $$ref{$pid}{files});
+
+        my @files = sortedfilelist ($ref, $pid);
+
+        for my $f (@files) {
+            my $total = ab ($$ref{$pid}{files}{$f}{mapped});
+
+            my @n = map { ab ($$ref{$pid}{files}{$f}{"n$_"}) } 
+                        ( 0 .. $maxnode );
+
+            printf "%5s %-9.9s %-*.*s $total [ @n ]\n",
+                   $pid, $$ref{$pid}{name}, $maxwid, $maxwid, basename ($f);
+
+            $t{total} += $$ref{$pid}{files}{$f}{mapped};
+            $t{nodes}[$_] += $$ref{$pid}{files}{$f}{"n$_"}||0 
+               for (0 .. $maxnode);
+        }
+
+        next unless ($conf{totals});
+
+        my $total = ab ($t{total});
+        my @n = map { ab ($_) } @{$t{nodes}};
+
+        printf "%-5.5s %-9.9s %-*.*s $total [ @n ]\n",
+               $pid, $$ref{$pid}{name}, $maxwid, $maxwid, "Total";
+    }
+}
+
+# vi: ts=4 sw=4 expandtab

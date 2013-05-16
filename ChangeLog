@@ -1,0 +1,47 @@
+2011-06-02  Mark Grondona  <mgrondona@llnl.gov>
+
+	* : tag v1.5.
+
+	* numa-maps : Fix bug in nnodes_available.
+
+2008-01-02  Mark Grondona  <mgrondona@llnl.gov>
+
+	* : tag v1.4.
+
+	* numa-maps : Fix prior change to print '?' on "taskset" failure.
+	  The program was always printing '?' for tasks bound to CPU 0.
+
+2007-12-18  Mark Grondona  <mgrondona@llnl.gov>
+
+	* : tag v1.3.
+
+	* numa-maps : Print '?' if taskset fails to obtain CPU 
+	  affinity for a given PID. This could happen if a process
+	  exits between numa-maps startup and display.
+
+2007-07-10  Mark Grondona  <mgrondona@llnl.gov>
+
+	* : tag v1.2.
+
+	* numa-maps.1 : Updates.
+
+	* numa-maps : Remove -q, --ignore-zero option. Processes without
+	  a memory map are silently ignored now.
+
+	* numa-maps : Complete rewrite to support new numa_maps format.
+
+2007-02-15  Mark Grondona  <mgrondona@llnl.gov>
+
+	* : tag v1.1.
+
+	* numa-maps : Properly match process names with -n.
+
+	* numa-maps : Ignore processes where /proc/pid/maps is
+	  not accessible.
+
+2007-01-12  Mark Grondona  <mgrondona@llnl.gov>
+
+	* : tag v1.0.
+
+	* : Initial revision.
+

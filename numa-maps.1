@@ -1,0 +1,66 @@
+.\"  $Id: numa-maps.1 10999 2011-06-02 17:38:13Z grondo $
+
+.TH NUMA-MAPS 1 "numa-maps-1.5" 
+
+.SH NAME
+numa-maps \- Display NUMA information for processes.
+
+.SH SYNOPSIS
+.B numa-maps
+[\fIOPTIONS\fR]... PIDs...
+.br
+.B numa-maps
+\fI-u\fR user [\fIOPTIONS\fR]...
+.br
+.B numa-maps
+\fI-n\fR pattern [\fIOPTIONS\fR]...
+.br
+.B numa-maps
+\fI-a\fR [\fIOPTIONS\fR]...
+
+.SH DESCRIPTION
+The \fBnuma-maps\fR program displays information about how 
+memory for processes is laid out on a NUMA system. \fBnuma-maps\fR
+can display information about stack and heap, as well
+as shared library and other memory mappings. It requires
+the existence of the /proc/PID/numa_maps file.
+.PP
+By default \fBnuma-maps\fR displays information for the total mapped
+stack and heap memory only. Processes without a virtual memory map
+are silently ignored.
+
+.SH OPTIONS
+.TP
+.BI "-h, --help"
+Display a summary of the command-line options.
+.BI "-H, --heap-only"
+Display NUMA information for heap only.
+.TP
+.BI "-S, --stack-only"
+Display NUMA information for stack only.
+.TP
+.BI "-F, --full"
+Display NUMA information for all mapped files, stack, and heap.
+.TP
+.BI "-n, --no-header"
+Omit the header row.
+.TP
+
+.SH PROCESS SELECTION OPTIONS
+.TP
+.BI "-u, --user=name"
+Report on all processes owned by user \fIname\fR. The argument
+\fIname\fR may be either a user name or UID.
+.TP
+.BI "-n, --name=pattern"
+Report on all processes whose name matches \fIpattern\fR.
+.TP
+.BI "-a, --all"
+Report on all processes owned by the current user.
+If run as root, \fI--all\fR will report on all running
+processes on the system (which have a VM).
+
+
+.SH FILES
+/proc/PID/numa_maps, /proc/PID/maps
+
